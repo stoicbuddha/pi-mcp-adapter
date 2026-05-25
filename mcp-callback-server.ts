@@ -64,12 +64,12 @@ interface PendingAuth {
 
 /** Server singleton state */
 let server: Server | undefined
+let bindingPromise: Promise<void> | undefined
 const pendingAuths = new Map<string, PendingAuth>()
+const reservedAuthStates = new Set<string>()
 
 /** Timeout for callback completion (5 minutes) */
 const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000
-
-const MAX_PORT_SCAN_ATTEMPTS = 25
 
 interface EnsureCallbackServerOptions {
   strictPort?: boolean
@@ -146,72 +146,96 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
 /**
  * Ensure the callback server is running.
  * If strictPort is true, requires binding on the configured callback port.
- * If strictPort is false, scans forward for an available local port.
+ * If strictPort is false, asks the OS for an available local port.
  */
 export async function ensureCallbackServer(options: EnsureCallbackServerOptions = {}): Promise<void> {
+  while (bindingPromise) {
+    await bindingPromise
+  }
+
+  const operation = ensureCallbackServerLocked(options)
+  bindingPromise = operation
+  try {
+    await operation
+  } finally {
+    if (bindingPromise === operation) {
+      bindingPromise = undefined
+    }
+  }
+}
+
+async function ensureCallbackServerLocked(options: EnsureCallbackServerOptions = {}): Promise<void> {
   const configuredPort = getConfiguredOAuthCallbackPort()
   const strictPort = options.strictPort === true
 
-  if (server) {
+  const previousServer = server
+  const needsStrictRebind = Boolean(previousServer && strictPort && getOAuthCallbackPort() !== configuredPort)
+
+  if (previousServer) {
     if (!strictPort || getOAuthCallbackPort() === configuredPort) return
 
-    if (pendingAuths.size > 0) {
+    if (pendingAuths.size > 0 || reservedAuthStates.size > 0) {
       throw new Error(
         `OAuth callback server is running on port ${getOAuthCallbackPort()}, but strict callback port ${configuredPort} is required and cannot be switched while authorizations are pending`
       )
     }
-
-    await stopCallbackServer()
   }
 
-  const preferredPort = configuredPort
-  const maxAttempts = strictPort ? 1 : MAX_PORT_SCAN_ATTEMPTS
-  let lastError: Error | undefined
+  const candidateServer = createServer(handleRequest)
+  const listenPort = strictPort ? configuredPort : 0
 
-  for (let offset = 0; offset < maxAttempts; offset++) {
-    const candidatePort = preferredPort + offset
-    const candidateServer = createServer(handleRequest)
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        candidateServer.once("error", (err) => {
-          reject(err)
-        })
-
-        candidateServer.listen(candidatePort, "localhost", () => {
-          resolve()
-        })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      candidateServer.once("error", (err) => {
+        reject(err)
       })
 
-      server = candidateServer
-      server.unref()
-      setOAuthCallbackPort(candidatePort)
-      return
-    } catch (error) {
-      const nodeError = error as NodeJS.ErrnoException
-      await new Promise<void>((resolve) => {
-        candidateServer.close(() => resolve())
+      candidateServer.listen(listenPort, "localhost", () => {
+        resolve()
       })
+    })
 
-      if (nodeError.code !== "EADDRINUSE") {
-        throw error
+    if (strictPort) {
+      setOAuthCallbackPort(configuredPort)
+    } else {
+      const address = candidateServer.address()
+      if (!address || typeof address === "string" || typeof address.port !== "number") {
+        throw new Error("OAuth callback server did not report an assigned port")
       }
-
-      lastError = error instanceof Error ? error : new Error(String(error))
+      setOAuthCallbackPort(address.port)
     }
-  }
 
-  if (strictPort) {
-    throw new Error(
-      `OAuth callback port ${preferredPort} is already in use. Pre-registered OAuth clients require an exact redirect URI; set MCP_OAUTH_CALLBACK_PORT to your registered port or free port ${preferredPort}`,
-      { cause: lastError }
-    )
-  }
+    if (needsStrictRebind) {
+      await new Promise<void>((resolve) => {
+        previousServer!.close(() => resolve())
+      })
+    }
 
-  throw new Error(
-    `OAuth callback port ${preferredPort} is already in use and no free port was found in range ${preferredPort}-${preferredPort + MAX_PORT_SCAN_ATTEMPTS - 1}`,
-    { cause: lastError }
-  )
+    server = candidateServer
+    server.unref()
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException
+    await new Promise<void>((resolve) => {
+      candidateServer.close(() => resolve())
+    })
+
+    if (strictPort && nodeError.code === "EADDRINUSE") {
+      throw new Error(
+        `OAuth callback port ${configuredPort} is already in use. Pre-registered OAuth clients require an exact redirect URI; set MCP_OAUTH_CALLBACK_PORT to your registered port or free port ${configuredPort}`,
+        { cause: error }
+      )
+    }
+
+    throw error
+  }
+}
+
+export function reserveCallbackServer(oauthState: string): void {
+  reservedAuthStates.add(oauthState)
+}
+
+export function releaseCallbackServer(oauthState: string): void {
+  reservedAuthStates.delete(oauthState)
 }
 
 /**
@@ -219,6 +243,7 @@ export async function ensureCallbackServer(options: EnsureCallbackServerOptions 
  * Returns a promise that resolves with the authorization code.
  */
 export function waitForCallback(oauthState: string): Promise<string> {
+  reservedAuthStates.delete(oauthState)
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       if (pendingAuths.has(oauthState)) {
@@ -235,6 +260,7 @@ export function waitForCallback(oauthState: string): Promise<string> {
  * Cancel a pending authorization by state.
  */
 export function cancelPendingCallback(oauthState: string): void {
+  reservedAuthStates.delete(oauthState)
   const pending = pendingAuths.get(oauthState)
   if (pending) {
     clearTimeout(pending.timeout)
@@ -261,6 +287,7 @@ export async function stopCallbackServer(): Promise<void> {
   // Reject all pending auths (defer to allow any pending operations to complete)
   const pendingList = Array.from(pendingAuths.entries())
   pendingAuths.clear()
+  reservedAuthStates.clear()
   setTimeout(() => {
     for (const [, pending] of pendingList) {
       clearTimeout(pending.timeout)

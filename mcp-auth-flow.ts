@@ -16,6 +16,8 @@ import {
   waitForCallback,
   cancelPendingCallback,
   stopCallbackServer,
+  reserveCallbackServer,
+  releaseCallbackServer,
 } from "./mcp-callback-server.ts"
 import {
   getAuthForUrl,
@@ -96,12 +98,19 @@ export async function startAuth(
     return { authorizationUrl: "" }
   }
 
-  // Start the callback server.
-  // Pre-registered OAuth clients require an exact redirect URI, so enforce strict port binding.
-  await ensureCallbackServer({ strictPort: Boolean(config.clientId) })
-
   const oauthState = generateState()
   await updateOAuthState(serverName, oauthState, serverUrl)
+  reserveCallbackServer(oauthState)
+
+  try {
+    // Start the callback server.
+    // Pre-registered OAuth clients require an exact redirect URI, so enforce strict port binding.
+    await ensureCallbackServer({ strictPort: Boolean(config.clientId) })
+  } catch (error) {
+    releaseCallbackServer(oauthState)
+    await clearOAuthState(serverName)
+    throw error
+  }
 
   let capturedUrl: URL | undefined
   const authProvider = new McpOAuthProvider(serverName, serverUrl, config, {
@@ -113,10 +122,12 @@ export async function startAuth(
   try {
     const result = await runSdkAuth(authProvider, { serverUrl })
     if (result === "AUTHORIZED") {
+      releaseCallbackServer(oauthState)
       await clearOAuthState(serverName)
       return { authorizationUrl: "" }
     }
     if (!capturedUrl) {
+      releaseCallbackServer(oauthState)
       throw new UnauthorizedError("OAuth authorization URL was not provided")
     }
     pendingTransports.set(
@@ -125,6 +136,7 @@ export async function startAuth(
     )
     return { authorizationUrl: capturedUrl.toString() }
   } catch (error) {
+    releaseCallbackServer(oauthState)
     await clearOAuthState(serverName)
     throw error
   }
@@ -347,11 +359,9 @@ export function supportsOAuth(definition: ServerEntry): boolean {
 
 /**
  * Initialize the OAuth system on startup.
- * Starts the callback server if there are any OAuth servers configured.
+ * OAuth callback binding is lazy and starts from startAuth() only.
  */
-export async function initializeOAuth(): Promise<void> {
-  await ensureCallbackServer()
-}
+export async function initializeOAuth(): Promise<void> {}
 
 /**
  * Shutdown the OAuth system.

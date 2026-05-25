@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   waitForCallback: vi.fn(),
   cancelPendingCallback: vi.fn(),
   stopCallbackServer: vi.fn(),
+  reserveCallbackServer: vi.fn(),
+  releaseCallbackServer: vi.fn(),
   open: vi.fn(),
   sdkAuth: vi.fn(),
   finishAuth: vi.fn(),
@@ -37,6 +39,8 @@ vi.mock("../mcp-callback-server.ts", () => ({
   waitForCallback: mocks.waitForCallback,
   cancelPendingCallback: mocks.cancelPendingCallback,
   stopCallbackServer: mocks.stopCallbackServer,
+  reserveCallbackServer: mocks.reserveCallbackServer,
+  releaseCallbackServer: mocks.releaseCallbackServer,
 }));
 
 vi.mock("open", () => ({
@@ -55,6 +59,8 @@ describe("mcp-auth-flow explicit auth", () => {
     mocks.waitForCallback.mockReset();
     mocks.cancelPendingCallback.mockReset();
     mocks.stopCallbackServer.mockReset();
+    mocks.reserveCallbackServer.mockReset();
+    mocks.releaseCallbackServer.mockReset();
     mocks.open.mockReset();
     mocks.sdkAuth.mockReset().mockResolvedValue("AUTHORIZED");
     mocks.finishAuth.mockReset().mockResolvedValue(undefined);
@@ -68,6 +74,14 @@ describe("mcp-auth-flow explicit auth", () => {
     } else {
       process.env.MCP_OAUTH_DIR = originalOAuthDir;
     }
+  });
+
+  it("does not start the callback server during OAuth initialization", async () => {
+    const { initializeOAuth } = await import("../mcp-auth-flow.ts");
+
+    await initializeOAuth();
+
+    expect(mocks.ensureCallbackServer).not.toHaveBeenCalled();
   });
 
   it("authenticates client_credentials non-interactively without callback server or browser", async () => {

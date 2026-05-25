@@ -5,6 +5,7 @@ type MockServer = {
   listen: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   unref: ReturnType<typeof vi.fn>;
+  address: ReturnType<typeof vi.fn>;
   handlers: Map<string, (error?: NodeJS.ErrnoException) => void>;
 };
 
@@ -15,6 +16,7 @@ const mocks = vi.hoisted(() => {
   };
 
   const runtime = {
+    assignedPort: 4338,
     listenImpl: (
       _server: MockServer,
       _port: number,
@@ -39,6 +41,7 @@ const mocks = vi.hoisted(() => {
       }),
       close: vi.fn((cb?: () => void) => cb?.()),
       unref: vi.fn(),
+      address: vi.fn(() => ({ address: "127.0.0.1", family: "IPv4", port: runtime.assignedPort })),
     };
 
     runtime.servers.push(server);
@@ -73,6 +76,7 @@ describe("mcp-callback-server", () => {
     vi.resetModules();
     mocks.state.configuredPort = 4337;
     mocks.state.activePort = 4337;
+    mocks.runtime.assignedPort = 4338;
     mocks.runtime.servers = [];
     mocks.runtime.listenImpl = (_server, _port, onListen) => {
       onListen();
@@ -83,13 +87,24 @@ describe("mcp-callback-server", () => {
     mocks.setOAuthCallbackPort.mockClear();
   });
 
-  it("binds localhost and unrefs the callback server after a successful bind", async () => {
+  it("binds localhost on an OS-assigned port and unrefs after a successful non-strict bind", async () => {
     const { ensureCallbackServer } = await import("../mcp-callback-server.ts");
 
     await ensureCallbackServer();
 
-    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(4337, "localhost", expect.any(Function));
+    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(0, "localhost", expect.any(Function));
     expect(mocks.runtime.servers[0]?.unref).toHaveBeenCalledTimes(1);
+    expect(mocks.state.activePort).toBe(4338);
+  });
+
+  it("binds the configured localhost port exactly in strict mode", async () => {
+    const { ensureCallbackServer } = await import("../mcp-callback-server.ts");
+
+    await ensureCallbackServer({ strictPort: true });
+
+    expect(mocks.runtime.servers[0]?.listen).toHaveBeenCalledWith(4337, "localhost", expect.any(Function));
+    expect(mocks.runtime.servers[0]?.listen).not.toHaveBeenCalledWith(0, "localhost", expect.any(Function));
+    expect(mocks.state.activePort).toBe(4337);
   });
 
   it("does not unref when bind fails", async () => {
@@ -105,20 +120,27 @@ describe("mcp-callback-server", () => {
     expect(mocks.runtime.servers[0]?.unref).not.toHaveBeenCalled();
   });
 
-  it("rebinds to the configured port when strict mode is requested", async () => {
-    let firstConfiguredAttemptBlocked = true;
-    mocks.runtime.listenImpl = (_server, port, onListen, handlers) => {
-      if (port === mocks.state.configuredPort && firstConfiguredAttemptBlocked) {
-        firstConfiguredAttemptBlocked = false;
-        Promise.resolve().then(() => {
-          handlers.get("error")?.(Object.assign(new Error("EADDRINUSE"), { code: "EADDRINUSE" }));
-        });
-        return;
-      }
-
-      onListen();
+  it("serializes concurrent callback server startup", async () => {
+    let resolveListen: (() => void) | undefined;
+    mocks.runtime.listenImpl = (_server, _port, onListen) => {
+      resolveListen = onListen;
     };
 
+    const { ensureCallbackServer } = await import("../mcp-callback-server.ts");
+
+    const first = ensureCallbackServer();
+    const second = ensureCallbackServer();
+    expect(mocks.runtime.servers).toHaveLength(1);
+
+    resolveListen?.();
+    await Promise.all([first, second]);
+
+    expect(mocks.runtime.servers).toHaveLength(1);
+    expect(mocks.runtime.servers[0]?.unref).toHaveBeenCalledTimes(1);
+    expect(mocks.state.activePort).toBe(4338);
+  });
+
+  it("rebinds to the configured port when strict mode is requested", async () => {
     const { ensureCallbackServer } = await import("../mcp-callback-server.ts");
 
     await ensureCallbackServer();
@@ -126,14 +148,19 @@ describe("mcp-callback-server", () => {
 
     await ensureCallbackServer({ strictPort: true });
 
+    expect(mocks.runtime.servers[0]?.close).toHaveBeenCalledTimes(1);
+    expect(mocks.runtime.servers[1]?.listen).toHaveBeenCalledWith(4337, "localhost", expect.any(Function));
     expect(mocks.state.activePort).toBe(4337);
   });
 
-  it("does not switch ports in strict mode while callbacks are pending", async () => {
-    let firstConfiguredAttemptBlocked = true;
+  it("keeps the existing callback server when strict rebind fails", async () => {
+    const { ensureCallbackServer, isCallbackServerRunning } = await import("../mcp-callback-server.ts");
+
+    await ensureCallbackServer();
+    expect(mocks.state.activePort).toBe(4338);
+
     mocks.runtime.listenImpl = (_server, port, onListen, handlers) => {
-      if (port === mocks.state.configuredPort && firstConfiguredAttemptBlocked) {
-        firstConfiguredAttemptBlocked = false;
+      if (port === mocks.state.configuredPort) {
         Promise.resolve().then(() => {
           handlers.get("error")?.(Object.assign(new Error("EADDRINUSE"), { code: "EADDRINUSE" }));
         });
@@ -143,6 +170,30 @@ describe("mcp-callback-server", () => {
       onListen();
     };
 
+    await expect(ensureCallbackServer({ strictPort: true })).rejects.toThrow(/already in use/);
+
+    expect(isCallbackServerRunning()).toBe(true);
+    expect(mocks.runtime.servers[0]?.close).not.toHaveBeenCalled();
+    expect(mocks.state.activePort).toBe(4338);
+  });
+
+  it("does not switch ports in strict mode while an authorization URL can reference the active port", async () => {
+    const {
+      ensureCallbackServer,
+      reserveCallbackServer,
+      releaseCallbackServer,
+    } = await import("../mcp-callback-server.ts");
+
+    await ensureCallbackServer();
+    reserveCallbackServer("reserved-state");
+
+    await expect(ensureCallbackServer({ strictPort: true })).rejects.toThrow(/cannot be switched while authorizations are pending/);
+    expect(mocks.runtime.servers).toHaveLength(1);
+
+    releaseCallbackServer("reserved-state");
+  });
+
+  it("does not switch ports in strict mode while callbacks are pending", async () => {
     const {
       ensureCallbackServer,
       waitForCallback,
@@ -153,6 +204,7 @@ describe("mcp-callback-server", () => {
     const pending = waitForCallback("pending-state");
 
     await expect(ensureCallbackServer({ strictPort: true })).rejects.toThrow(/cannot be switched while authorizations are pending/);
+    expect(mocks.runtime.servers).toHaveLength(1);
 
     cancelPendingCallback("pending-state");
     await expect(pending).rejects.toThrow(/Authorization cancelled/);

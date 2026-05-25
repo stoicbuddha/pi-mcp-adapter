@@ -4,6 +4,7 @@
 
 import { describe, it, beforeEach, afterEach } from "node:test"
 import assert from "node:assert"
+import { createServer } from "node:http"
 import {
   ensureCallbackServer,
   waitForCallback,
@@ -12,7 +13,7 @@ import {
   isCallbackServerRunning,
   getPendingAuthCount,
 } from "./mcp-callback-server.ts"
-import { getOAuthCallbackPort } from "./mcp-oauth-provider.ts"
+import { getConfiguredOAuthCallbackPort, getOAuthCallbackPort } from "./mcp-oauth-provider.ts"
 
 describe("mcp-callback-server", () => {
   beforeEach(async () => {
@@ -36,6 +37,43 @@ describe("mcp-callback-server", () => {
       await ensureCallbackServer()
       await ensureCallbackServer()
       assert.strictEqual(isCallbackServerRunning(), true)
+    })
+
+    it("should use an OS-assigned port when the configured non-strict port is occupied", async () => {
+      const configuredPort = getConfiguredOAuthCallbackPort()
+      const blocker = createServer((_req, res) => {
+        res.writeHead(200)
+        res.end("blocked")
+      })
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          blocker.once("error", reject)
+          blocker.listen(configuredPort, "localhost", resolve)
+        })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") return
+        throw error
+      }
+
+      try {
+        await ensureCallbackServer()
+        const callbackPort = getOAuthCallbackPort()
+        assert.notStrictEqual(callbackPort, configuredPort)
+
+        const state = "occupied-port-state"
+        const callbackPromise = waitForCallback(state)
+        const response = await fetch(`http://localhost:${callbackPort}/callback?code=ok&state=${state}`)
+        assert.strictEqual(response.status, 200)
+        assert.strictEqual(await callbackPromise, "ok")
+
+        await assert.rejects(
+          async () => await ensureCallbackServer({ strictPort: true }),
+          /already in use/
+        )
+      } finally {
+        await new Promise<void>((resolve) => blocker.close(() => resolve()))
+      }
     })
   })
 
