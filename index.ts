@@ -55,11 +55,11 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   const directSpecs = envRaw === "__none__"
     ? []
     : resolveDirectTools(
-        earlyConfig,
-        earlyCache,
-        prefix,
-        envRaw?.split(",").map(s => s.trim()).filter(Boolean),
-      );
+      earlyConfig,
+      earlyCache,
+      prefix,
+      envRaw?.split(",").map(s => s.trim()).filter(Boolean),
+    );
   const missingConfiguredDirectToolServers = getMissingConfiguredDirectToolServers(earlyConfig, earlyCache);
   const shouldRegisterProxyTool =
     earlyConfig.settings?.disableProxyTool !== true
@@ -256,7 +256,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       renderCall: renderMcpProxyToolCall,
       parameters: Type.Object({
         tool: Type.Optional(Type.String({ description: "Tool name to call (e.g., 'xcodebuild_list_sims')" })),
-        args: Type.Optional(Type.String({ description: "Arguments as JSON string (e.g., '{\"key\": \"value\"}')" })),
+        args: Type.Optional(Type.Union([Type.String(), Type.Object({})], { description: "Arguments as JSON string or object (e.g., '{\"key\": \"value\"}' or {key: \"value\"})" })),
         connect: Type.Optional(Type.String({ description: "Server name to connect (lazy connect + metadata refresh)" })),
         describe: Type.Optional(Type.String({ description: "Tool name to describe (shows parameters)" })),
         search: Type.Optional(Type.String({ description: "Search tools by name/description" })),
