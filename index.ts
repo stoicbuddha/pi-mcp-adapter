@@ -277,10 +277,16 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         server?: string;
         action?: string;
       }, _signal, _onUpdate, _ctx) {
+        // Preprocess args: if the LLM passes an object instead of a JSON string, coerce it
+        const rawArgs = (params as unknown as { args?: unknown }).args;
+        const argsStr: string | undefined = rawArgs && typeof rawArgs === 'object'
+          ? JSON.stringify(rawArgs)
+          : rawArgs as string | undefined;
+
         let parsedArgs: Record<string, unknown> | undefined;
-        if (params.args) {
+        if (argsStr) {
           try {
-            parsedArgs = JSON.parse(params.args);
+            parsedArgs = JSON.parse(argsStr);
             if (typeof parsedArgs !== "object" || parsedArgs === null || Array.isArray(parsedArgs)) {
               const gotType = Array.isArray(parsedArgs) ? "array" : parsedArgs === null ? "null" : typeof parsedArgs;
               throw new Error(`Invalid args: expected a JSON object, got ${gotType}`);
