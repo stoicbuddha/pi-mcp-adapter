@@ -142,6 +142,26 @@ Pi-specific files are the write targets for imported or shared global servers wh
 
 For pre-registered browser OAuth clients, set `oauth.redirectUri` to the exact callback registered with the provider, for example `"http://localhost:3118/callback"`. Dynamic clients normally omit it and use a lazy OS-assigned localhost callback port.
 
+### Remote/headless OAuth
+
+If Pi is running on a remote server and cannot open a local browser, start OAuth through the proxy tool:
+
+```js
+mcp({ action: "auth-start", server: "linear-server" })
+```
+
+Open the returned authorization URL in your local browser. After approval, your browser redirects to a localhost URL. On a remote server that local page may fail to load; copy the full URL from the browser address bar anyway and complete the flow in the same Pi session:
+
+```js
+mcp({
+  action: "auth-complete",
+  server: "linear-server",
+  args: '{"redirectUrl":"http://localhost:19876/callback?code=...&state=..."}'
+})
+```
+
+You can also pass only the `code` query parameter with `args: '{"code":"..."}'`. Treat authorization URLs and codes as sensitive; they can grant access to the MCP server until the flow expires or completes.
+
 ### Lifecycle Modes
 
 - **`lazy`** (default) — Don't connect at startup. Connect on first tool call. Disconnect after idle timeout. Cached metadata keeps search/list working without connections.
@@ -169,14 +189,15 @@ For pre-registered browser OAuth clients, set `oauth.redirectUri` to the exact c
 | `autoAuth` | Auto-run OAuth on `connect`/tool calls when a server needs auth, then retry once (default: false). |
 | `sampling` | Allow MCP servers to sample through Pi models, honoring `modelPreferences.hints` before current/default fallback (default: true when UI approval is available). |
 | `samplingAutoApprove` | Skip sampling confirmation prompts. Required for sampling in non-UI sessions (default: false). |
-| `elicitation` | Allow MCP servers to request user input through Pi UI forms/URL prompts (default: true when Pi UI form support is available). |
-| `elicitationAutoOpenUrls` | Automatically open URL elicitations without prompting first (default: false). |
+| `elicitation` | Allow MCP servers to request user input through Pi dialogs (default: true when Pi UI is available). |
 
 Per-server `idleTimeout` overrides the global setting.
 
 ### MCP Elicitation
 
-When Pi exposes UI, the adapter advertises MCP elicitation support. Form elicitations are rendered with `ctx.ui.form()` and map Pi actions to MCP actions: submit → `accept`, secondary → `decline`, cancel → `cancel`. URL elicitations prompt before opening a browser unless `elicitationAutoOpenUrls` is enabled.
+When Pi exposes dialog-capable UI, the adapter advertises form elicitation support. Forms use Pi's stock `select()` and `input()` dialogs, validate the response, and provide a review/edit step before submission. Explicit refusal maps to MCP `decline`; dismissing a dialog maps to `cancel`.
+
+URL mode is advertised only in TUI mode. The adapter displays the requesting server, target host, and full URL, and always requires consent before opening the browser. It also handles URL-required tool errors (`-32042`) and completion notifications; after completing the browser interaction, retry the original tool call.
 
 ### Direct Tools
 
@@ -345,6 +366,8 @@ Prefer `.mcp.json` for project-local shared MCP config. Use `.pi/mcp.json` only 
 | Call | `mcp({ tool: "...", args: '{"key": "value"}' })` |
 | Connect | `mcp({ connect: "server-name" })` |
 | UI messages | `mcp({ action: "ui-messages" })` |
+| Auth start | `mcp({ action: "auth-start", server: "name" })` |
+| Auth complete | `mcp({ action: "auth-complete", server: "name", args: '{"redirectUrl":"..."}' })` |
 
 MCP proxy and direct-tool results render compactly by default: long text shows the first three lines plus a `Ctrl+O to expand` hint, while the full result remains available when expanded and is still returned unchanged to the model.
 
@@ -367,7 +390,7 @@ Tool names are fuzzy-matched on hyphens and underscores — `context7_resolve_li
 
 If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, and direct tool calls automatically run OAuth when needed and retry once.
 
-In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. In non-interactive sessions, browser-based OAuth still requires `/mcp-auth <server>`. `/mcp-auth` without a server only opens a picker in the interactive UI.
+In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. In remote/headless sessions, use the proxy tool's `auth-start` and `auth-complete` actions to copy the authorization URL locally and paste the redirect URL back into Pi. `/mcp-auth` without a server only opens a picker in the interactive UI.
 
 ## How It Works
 

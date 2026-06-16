@@ -1,4 +1,5 @@
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { UrlElicitationRequiredError } from "@modelcontextprotocol/sdk/types.js";
 import type { McpExtensionState } from "./state.ts";
 import type { DirectToolSpec, McpConfig, McpContent } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
@@ -22,7 +23,7 @@ type DirectAutoAuthResult =
 function getDirectAuthRequiredMessage(
   state: McpExtensionState,
   serverName: string,
-  defaultMessage = `MCP server "${serverName}" requires OAuth authentication. Run /mcp-auth ${serverName} first.`,
+  defaultMessage = `MCP server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`,
 ): string {
   return formatAuthRequiredMessage(state.config, serverName, defaultMessage);
 }
@@ -32,7 +33,7 @@ function getDirectAuthFailedMessage(state: McpExtensionState, serverName: string
   if (customGuidance) {
     return `OAuth authentication failed for "${serverName}": ${message}. ${getDirectAuthRequiredMessage(state, serverName)}`;
   }
-  return `OAuth authentication failed for "${serverName}": ${message}. Run /mcp-auth ${serverName} first.`;
+  return `OAuth authentication failed for "${serverName}": ${message}. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`;
 }
 
 async function attemptDirectAutoAuth(
@@ -55,7 +56,7 @@ async function attemptDirectAutoAuth(
       message: getDirectAuthRequiredMessage(
         state,
         serverName,
-        `MCP server "${serverName}" requires OAuth authentication. Run /mcp-auth ${serverName} in an interactive session.`,
+        `MCP server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`,
       ),
     };
   }
@@ -255,7 +256,9 @@ export function buildProxyDescription(
   desc += `  mcp({ connect: "server-name" })       → Connect to a server and refresh metadata\n`;
   desc += `  mcp({ tool: "name", args: '{"key": "value"}' })    → Call a tool (args is JSON string)\n`;
   desc += `  mcp({ action: "ui-messages" })        → Retrieve accumulated messages from completed UI sessions\n`;
-  desc += `\nMode: tool (call) > connect > describe > search > server (list) > action > nothing (status)`;
+  desc += `  mcp({ action: "auth-start", server: "name" })      → Start manual OAuth and get a browser URL\n`;
+  desc += `  mcp({ action: "auth-complete", server: "name", args: '{"redirectUrl":"..."}' }) → Complete manual OAuth\n`;
+  desc += `\nMode: action > tool (call) > connect > describe > search > server (list) > nothing (status)`;
 
   return desc;
 }
@@ -406,6 +409,17 @@ export function createDirectToolExecutor(
         details: { server: spec.serverName, tool: spec.originalName },
       };
     } catch (error) {
+      if (error instanceof UrlElicitationRequiredError) {
+        const action = await state.manager.handleUrlElicitationRequired(spec.serverName, error);
+        const message = action === "accept"
+          ? "The original MCP tool did not run. Complete the opened browser interaction, then retry the tool."
+          : `The URL interaction was ${action === "decline" ? "declined" : "cancelled"}.`;
+        uiSession?.sendToolCancelled(message);
+        return {
+          content: [{ type: "text" as const, text: message }],
+          details: { error: "url_elicitation_required", server: spec.serverName, action },
+        };
+      }
       const message = error instanceof Error ? error.message : String(error);
       uiSession?.sendToolCancelled(message);
       let errorText = `Failed to call tool: ${message}`;
